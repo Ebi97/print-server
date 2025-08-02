@@ -1,140 +1,147 @@
 // server.js
 const express = require('express');
-const cors = require('cors');
+const cors    = require('cors');
 const { Pool } = require('pg');
-const crypto = require('crypto');
+const crypto  = require('crypto');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// --- Middlewares ---
+// middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// --- Conexão PostgreSQL via ENV ---
+// conexão PostgreSQL via ENV
 const pool = new Pool({
-  host:     process.env.PGHOST     || 'postgres',
-  port:     process.env.PGPORT     || 5432,
-  user:     process.env.PGUSER     || 'postgres',
-  password: process.env.PGPASSWORD || '',
-  database: process.env.PGDATABASE || 'postgres',
+  host:     process.env.PGHOST,
+  port:     process.env.PGPORT,
+  user:     process.env.PGUSER,
+  password: process.env.PGPASSWORD,
+  database: process.env.PGDATABASE,
 });
 
-// --- Inicialização do banco ---
+// cria extensão e tabela
 async function initDb() {
-  // Garante a extensão para uuid
-  await pool.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`).catch(() => {});
-  // Cria tabela jobs se não existir
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS jobs (
-      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      pdf_data    TEXT NOT NULL,
-      printer     TEXT,
-      status      TEXT NOT NULL DEFAULT 'pending',
-      tries       INT  NOT NULL DEFAULT 0,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      numero_pedido TEXT UNIQUE,
+      pdf_base64    TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending',
+      tries         INT  NOT NULL DEFAULT 0,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
   console.log('✅ Tabela jobs pronta');
 }
 
-// --- Endpoints ---
+// healthcheck
+app.get('/health', (_, res) => res.status(200).json({ status: 'ok' }));
 
-// Health check
-app.get('/health', (_, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-// Enfileirar um PDF
+// enfileira, ignorando duplicados
 app.post('/print', async (req, res) => {
-  const { pdfbase64, printer } = req.body;
-  if (!pdfbase64) {
-    return res.status(400).json({ error: 'pdfbase64 é obrigatório' });
-  }
-  const id = crypto.randomUUID();
+  const { pdfbase64, numeroPedido } = req.body;
+  if (!pdfbase64)    return res.status(400).json({ erro: 'pdfbase64 é obrigatório' });
+  if (!numeroPedido) return res.status(400).json({ erro: 'numeroPedido é obrigatório' });
+
   try {
-    await pool.query(
-      `INSERT INTO jobs(id, pdf_data, printer) VALUES($1, $2, $3)`,
-      [id, pdfbase64, printer || null]
-    );
-    console.log(`✅ Job enfileirado: ${id}`);
-    return res.json({ id });
+    const sql = `
+      INSERT INTO jobs (numero_pedido, pdf_base64)
+      VALUES ($1, $2)
+      ON CONFLICT (numero_pedido) DO NOTHING
+      RETURNING id;
+    `;
+    const result = await pool.query(sql, [numeroPedido, pdfbase64]);
+    if (result.rowCount === 0) {
+      console.log(`⚠ Pedido ${numeroPedido} já estava na fila, ignorei.`);
+      return res.json({ mensagem: 'Já estava na fila.', numeroPedido });
+    }
+    const id = result.rows[0].id;
+    console.log(`✅ Pedido ${numeroPedido} adicionado na fila (id=${id}).`);
+    return res.json({ mensagem: 'Pedido adicionado na fila.', id, numeroPedido });
   } catch (err) {
-    console.error('❌ Erro ao inserir job:', err.message);
-    return res.status(500).json({ error: 'Erro interno.' });
+    console.error('❌ Erro ao inserir no banco:', err.message);
+    return res.status(500).json({ erro: 'Erro interno.' });
   }
 });
 
-// Marcar job como concluído
-app.post('/done', async (req, res) => {
-  const { id } = req.body;
-  if (!id) {
-    return res.status(400).json({ error: 'ID obrigatório.' });
-  }
-  try {
-    await pool.query(
-      `UPDATE jobs SET status = 'done' WHERE id = $1`,
-      [id]
-    );
-    console.log(`🆗 Job marcado como done: ${id}`);
-    return res.send();
-  } catch (err) {
-    console.error('❌ Erro ao marcar done:', err.message);
-    return res.status(500).json({ error: 'Erro interno.' });
-  }
-});
-
-// Marcar job como falhado e incrementar tentativas
-app.post('/fail', async (req, res) => {
-  const { id } = req.body;
-  if (!id) {
-    return res.status(400).json({ error: 'ID obrigatório.' });
-  }
-  try {
-    await pool.query(
-      `UPDATE jobs
-         SET status = 'failed',
-             tries  = tries + 1
-       WHERE id = $1`,
-      [id]
-    );
-    console.log(`⚠ Job marcado como failed: ${id}`);
-    return res.send();
-  } catch (err) {
-    console.error('❌ Erro ao marcar fail:', err.message);
-    return res.status(500).json({ error: 'Erro interno.' });
-  }
-});
-
-// Listar todos os jobs (debug)
+// lista apenas os pending
 app.get('/fila', async (_, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT
-        id,
-        pdf_data    AS "pdfbase64",
-        printer,
-        status,
-        tries,
-        created_at
+      SELECT id, numero_pedido AS "numeroPedido", pdf_base64 AS "pdfbase64"
       FROM jobs
-      ORDER BY created_at
+      WHERE status = 'pending'
+      ORDER BY created_at ASC
     `);
-    return res.json(rows);
+    res.json(rows);
   } catch (err) {
     console.error('❌ Erro ao buscar fila:', err.message);
-    return res.status(500).json({ error: 'Erro interno.' });
+    res.status(500).json({ erro: 'Erro interno.' });
   }
 });
 
-// --- Start ---
+// rota de lock atômico: marca processing e retorna um único job
+app.post('/lock', async (req, res) => {
+  const { id } = req.body;
+  try {
+    const { rows } = await pool.query(`
+      UPDATE jobs
+      SET status = 'processing'
+      WHERE id = $1 AND status = 'pending'
+      RETURNING id, pdf_base64 AS pdfbase64
+    `, [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'job não disponível ou já processado' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('❌ Erro no lock:', err.message);
+    res.status(500).json({ erro: 'Erro interno.' });
+  }
+});
+
+// marca sucesso (done)
+app.post('/remover', async (req, res) => {
+  const { id } = req.body;
+  if (!id) return res.status(400).json({ erro: 'ID obrigatório.' });
+  try {
+    await pool.query(`UPDATE jobs SET status = 'done' WHERE id = $1`, [id]);
+    console.log(`🗑 Pedido ${id} marcado como done.`);
+    res.json({ mensagem: 'Pedido removido.' });
+  } catch (err) {
+    console.error('❌ Erro ao deletar pedido:', err.message);
+    res.status(500).json({ erro: 'Erro interno.' });
+  }
+});
+
+// rota opcional de fail (incrementa tentativas)
+app.post('/fail', async (req, res) => {
+  const { id } = req.body;
+  if (!id) return res.status(400).json({ erro: 'ID obrigatório.' });
+  try {
+    await pool.query(`
+      UPDATE jobs
+      SET status = 'failed', tries = tries + 1
+      WHERE id = $1
+    `, [id]);
+    console.log(`⚠ Pedido ${id} marcado como failed.`);
+    res.send();
+  } catch (err) {
+    console.error('❌ Erro ao marcar fail:', err.message);
+    res.status(500).json({ erro: 'Erro interno.' });
+  }
+});
+
+// init + start
 initDb()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`🚀 print-server rodando em http://localhost:${PORT}`);
+      console.log(`🚀 API rodando em http://localhost:${PORT}`);
     });
   })
   .catch(err => {
-    console.error('❌ Falha na inicialização do banco:', err);
+    console.error('❌ falha na inicialização do banco:', err);
     process.exit(1);
   });
