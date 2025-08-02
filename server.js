@@ -1,82 +1,106 @@
+// server.js
 const express = require('express');
-const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
+const crypto = require('crypto');
 
 const app = express();
-const PORT = 3000;
+app.use(express.json());
 
-
-// Configurações
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-
-// Fila em memória
-const fila = [];
-
-/**
- * Endpoint para adicionar pedido na fila
- * Espera receber:
- * {
- *   pdfbase64: '...',
- *   numeroPedido: '12345', // ou outro identificador único
- *   outros_campos...
- * }
- */
-app.post('/print', (req, res) => {
-    const { pdfbase64, numeroPedido } = req.body;
-
-    if (!pdfbase64) {
-        return res.status(400).json({ erro: "PDF não enviado." });
-    }
-
-    if (!numeroPedido) {
-        // Se não vier identificador, cria um novo id interno
-        const id = uuidv4();
-        fila.push({ id, pdfbase64, data: req.body });
-        console.log(`✅ Pedido sem numeroPedido, adicionado com id interno: ${id}`);
-        return res.json({ mensagem: "Pedido adicionado na fila.", id });
-    }
-
-    // Verifica se já tem na fila (proteção)
-    const jaTem = fila.find(p => p.numeroPedido === numeroPedido);
-    if (jaTem) {
-        console.log(`⚠ Pedido ${numeroPedido} já está na fila, ignorado.`);
-        return res.json({ mensagem: "Pedido já estava na fila.", numeroPedido });
-    }
-
-    // Adiciona normalmente
-    const id = uuidv4();
-    fila.push({ id, numeroPedido, pdfbase64, data: req.body });
-    console.log(`✅ Pedido ${numeroPedido} adicionado na fila.`);
-    return res.json({ mensagem: "Pedido adicionado na fila.", id, numeroPedido });
+// --- configurações do PostgreSQL via ENV ---
+const pool = new Pool({
+  host:     process.env.PGHOST     || 'postgres',
+  port:     process.env.PGPORT     || 5432,
+  user:     process.env.PGUSER     || 'postgres',
+  password: process.env.PGPASSWORD || '',
+  database: process.env.PGDATABASE || 'postgres',
 });
 
-/**
- * Endpoint para consultar a fila
- */
-app.get('/fila', (req, res) => {
-    res.json(fila);
+// --- inicialização: cria tabela se não existir ---
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS jobs (
+      id          UUID PRIMARY KEY,
+      pdf_data    TEXT       NOT NULL,
+      printer     TEXT,
+      status      TEXT       NOT NULL DEFAULT 'pending',  -- pending, processing, done, failed
+      tries       INT        NOT NULL DEFAULT 0,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  console.log('✅ Tabela jobs pronta');
+}
+
+// --- rota para enfileirar um novo job ---
+app.post('/print', async (req, res) => {
+  const { pdfbase64, printer } = req.body;
+  if (!pdfbase64) {
+    return res.status(400).json({ error: 'pdfbase64 é obrigatório' });
+  }
+  const id = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO jobs(id, pdf_data, printer) VALUES($1, $2, $3)`,
+    [id, pdfbase64, printer || null]
+  );
+  res.json({ id });
 });
 
-/**
- * Endpoint para remover um pedido da fila
- * Espera: { id: '...' }
- */
-app.post('/remover', (req, res) => {
-    const { id } = req.body;
-    const index = fila.findIndex(p => p.id === id);
-    if (index !== -1) {
-        fila.splice(index, 1);
-        console.log(`🗑 Pedido removido da fila: ${id}`);
-        return res.json({ mensagem: "Pedido removido da fila." });
-    } else {
-        console.log(`⚠ Pedido não encontrado para remover: ${id}`);
-        return res.status(404).json({ erro: "Pedido não encontrado." });
-    }
+// --- rota para listar apenas os pending ---
+app.get('/fila', async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, pdf_data, printer 
+     FROM jobs 
+     WHERE status = 'pending' 
+     ORDER BY created_at ASC`
+  );
+  res.json(rows);
 });
 
-
-app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }));
-app.listen(PORT, () => {
-    console.log(`🚀 API rodando em http://localhost:${PORT}`);
+// --- rota para dar lock (atômico) e marcar como processing ---
+app.post('/lock', async (req, res) => {
+  const { id } = req.body;
+  const result = await pool.query(
+    `UPDATE jobs 
+     SET status = 'processing' 
+     WHERE id = $1 AND status = 'pending' 
+     RETURNING id, pdf_data AS pdfbase64, printer`,
+    [id]
+  );
+  if (result.rowCount === 0) {
+    return res.status(404).json({ error: 'job não disponível ou já processado' });
+  }
+  res.json(result.rows[0]);
 });
+
+// --- rota para marcar sucesso e não retornar mais na fila ---
+app.post('/remover', async (req, res) => {
+  const { id } = req.body;
+  await pool.query(
+    `UPDATE jobs SET status = 'done' WHERE id = $1`,
+    [id]
+  );
+  res.send();
+});
+
+// --- rota opcional para marcar falha e incrementar tentativas ---
+app.post('/fail', async (req, res) => {
+  const { id } = req.body;
+  await pool.query(
+    `UPDATE jobs 
+     SET status = 'failed', tries = tries + 1 
+     WHERE id = $1`,
+    [id]
+  );
+  res.send();
+});
+
+// --- inicializa DB e sobe servidor ---
+initDb()
+  .then(() => {
+    app.listen(3000, () => {
+      console.log('🚀 print-server rodando em http://localhost:3000');
+    });
+  })
+  .catch(err => {
+    console.error('❌ falha na inicialização do banco:', err);
+    process.exit(1);
+  });
