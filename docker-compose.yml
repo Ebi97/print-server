@@ -1,3 +1,5 @@
+version: "3.7"
+
 services:
   print-server:
     image: node:20
@@ -13,7 +15,6 @@ services:
       PGPASSWORD: Mfcd62!!Mfcd62!!
       PGDATABASE: postgres
       TZ: America/Sao_Paulo
-    depends_on: []
     networks:
       - network_public
     deploy:
@@ -25,3 +26,7 @@ services:
         - "traefik.http.routers.print-server.tls=true"
         - "traefik.http.routers.print-server.tls.certresolver=letsencryptresolver"
         - "traefik.http.services.print-server.loadbalancer.server.port=3000"
+
+networks:
+  network_public:
+    external: true
