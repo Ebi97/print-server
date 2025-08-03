@@ -26,11 +26,11 @@ async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS jobs (
       id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      numero_pedido TEXT UNIQUE,
       pdf_base64    TEXT NOT NULL,
       status        TEXT NOT NULL DEFAULT 'pending',
       tries         INT  NOT NULL DEFAULT 0,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      numero_pedido TEXT UNIQUE
     );
   `);
   console.log('✅ Tabela jobs pronta');
@@ -39,7 +39,7 @@ async function initDb() {
 // healthcheck
 app.get('/health', (_, res) => res.status(200).json({ status: 'ok' }));
 
-// enfileira, ignorando duplicados
+// enfileira, ignorando duplicados e sempre retornando o mesmo ID
 app.post('/print', async (req, res) => {
   const { pdfbase64, numeroPedido } = req.body;
   if (!pdfbase64)    return res.status(400).json({ erro: 'pdfbase64 é obrigatório' });
@@ -54,14 +54,19 @@ app.post('/print', async (req, res) => {
     `;
     const result = await pool.query(sql, [numeroPedido, pdfbase64]);
     if (result.rowCount === 0) {
+      // Pedido já existe! Busque o ID atual e retorne
+      const existing = await pool.query(
+        `SELECT id FROM jobs WHERE numero_pedido = $1`, [numeroPedido]
+      );
+      const id = existing.rows.length ? existing.rows[0].id : null;
       console.log(`⚠ Pedido ${numeroPedido} já estava na fila, ignorei.`);
-      return res.json({ mensagem: 'Já estava na fila.', numeroPedido });
+      return res.json({ mensagem: 'Já estava na fila.', numeroPedido, id });
     }
     const id = result.rows[0].id;
     console.log(`✅ Pedido ${numeroPedido} adicionado na fila (id=${id}).`);
     return res.json({ mensagem: 'Pedido adicionado na fila.', id, numeroPedido });
   } catch (err) {
-    console.error('❌ Erro ao inserir no banco:', err.message);
+    console.error('❌ Erro ao inserir no banco:', err);
     return res.status(500).json({ erro: 'Erro interno.' });
   }
 });
