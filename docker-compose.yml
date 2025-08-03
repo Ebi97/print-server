@@ -2,19 +2,18 @@ version: "3.7"
 
 services:
   print-server:
-    image: node:20  
+    image: node:20
     container_name: print-server
     working_dir: /app
     volumes:
       - ./server.js:/app/server.js
       - ./package.json:/app/package.json
-      # Adicione aqui outros arquivos necessários, ex: ./Dockerfile:/app/Dockerfile
     command: bash -c "npm install && node server.js"
     environment:
       PGHOST: postgres
       PGPORT: 5432
       PGUSER: postgres
-      PGPASSWORD:Mfcd62!!Mfcd62!!  
+      PGPASSWORD: Mfcd62!!Mfcd62!!
       PGDATABASE: postgres
       TZ: America/Sao_Paulo
     depends_on:
@@ -29,7 +28,7 @@ services:
     image: astraonline/postgrespgvector:2024
     container_name: postgres
     environment:
-      - POSTGRES_PASSWORD=Mfcd62!!Mfcd62!! 
+      - POSTGRES_PASSWORD=Mfcd62!!Mfcd62!!
       - TZ=America/Sao_Paulo
       - PG_MAX_CONNECTIONS=500
     volumes:
