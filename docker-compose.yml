@@ -40,4 +40,4 @@ volumes:
 
 networks:
   network_public:
-    driver: overlay
+    external: true
