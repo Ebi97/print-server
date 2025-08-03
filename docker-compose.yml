@@ -1,13 +1,6 @@
-version: "3.7"
-
 services:
   print-server:
-    image: node:20
-    working_dir: /app
-    volumes:
-      - ./server.js:/app/server.js
-      - ./package.json:/app/package.json
-    command: bash -c "npm install && node server.js"
+    image: joaopedrosb1/print-server:latest
     environment:
       PGHOST: postgres
       PGPORT: 5432
@@ -26,7 +19,6 @@ services:
         - "traefik.http.routers.print-server.tls=true"
         - "traefik.http.routers.print-server.tls.certresolver=letsencryptresolver"
         - "traefik.http.services.print-server.loadbalancer.server.port=3000"
-
 networks:
   network_public:
     external: true
