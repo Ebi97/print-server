@@ -43,17 +43,29 @@ app.get('/health', (_, res) => res.status(200).json({ status: 'ok' }));
 app.post('/print', async (req, res) => {
   const { pdfbase64, numeroPedido } = req.body;
   if (!pdfbase64)    return res.status(400).json({ erro: 'pdfbase64 é obrigatório' });
-  if (!numeroPedido) return res.status(400).json({ erro: 'numeroPedido é obrigatório' });
 
   try {
-    const sql = `
-      INSERT INTO jobs (numero_pedido, pdf_base64)
-      VALUES ($1, $2)
-      ON CONFLICT (numero_pedido) DO NOTHING
-      RETURNING id;
-    `;
-    const result = await pool.query(sql, [numeroPedido, pdfbase64]);
-    if (result.rowCount === 0) {
+    let sql, params;
+    if (numeroPedido) {
+      sql = `
+        INSERT INTO jobs (numero_pedido, pdf_base64)
+        VALUES ($1, $2)
+        ON CONFLICT (numero_pedido) DO NOTHING
+        RETURNING id;
+      `;
+      params = [numeroPedido, pdfbase64];
+    } else {
+      sql = `
+        INSERT INTO jobs (pdf_base64)
+        VALUES ($1)
+        RETURNING id;
+      `;
+      params = [pdfbase64];
+    }
+
+    const result = await pool.query(sql, params);
+
+    if (result.rowCount === 0 && numeroPedido) {
       // Pedido já existe! Busque o ID atual e retorne
       const existing = await pool.query(
         `SELECT id FROM jobs WHERE numero_pedido = $1`, [numeroPedido]
@@ -62,9 +74,11 @@ app.post('/print', async (req, res) => {
       console.log(`⚠ Pedido ${numeroPedido} já estava na fila, ignorei.`);
       return res.json({ mensagem: 'Já estava na fila.', numeroPedido, id });
     }
+
     const id = result.rows[0].id;
-    console.log(`✅ Pedido ${numeroPedido} adicionado na fila (id=${id}).`);
-    return res.json({ mensagem: 'Pedido adicionado na fila.', id, numeroPedido });
+    console.log(`✅ Pedido adicionado na fila (id=${id})${numeroPedido ? ' (numeroPedido='+numeroPedido+')' : ''}.`);
+    return res.json({ mensagem: 'Pedido adicionado na fila.', id, numeroPedido: numeroPedido || null });
+
   } catch (err) {
     console.error('❌ Erro ao inserir no banco:', err);
     return res.status(500).json({ erro: 'Erro interno.' });
